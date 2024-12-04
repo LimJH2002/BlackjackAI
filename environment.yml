@@ -15,4 +15,5 @@ dependencies:
   - pytorch
   - torchaudio
   - torchvision
+  - ultralytics
 prefix: /opt/anaconda3/envs/BlackjackAI
