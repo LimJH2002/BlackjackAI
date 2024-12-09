@@ -90,24 +90,22 @@ if __name__ == "__main__":
         pin_memory=True,
     )
 
-    device = torch.device("cpu")
+    device = torch.device("cuda")
     model = get_model(num_classes).to(device)
 
-    # Load previous results if they exist
-    losses = []
-    accs = []
-    if os.path.exists("mobilenet_results.txt"):
-        with open("mobilenet_results.txt", mode="r") as file:
-            lines = file.readlines()
-            losses = ast.literal_eval(lines[0][len("Training losses: ") :].strip())
-            accs = ast.literal_eval(lines[1][len("Testing accuracies: ") :].strip())
-
+    PATH = './mobilenet_card_detector.pth'
+    
     # Define optimizer and transform
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
     transform = transforms.ToTensor()
-    num_epochs = 5
+    num_epochs = 50
 
-    print(f"Training on CPU with {torch.get_num_threads()} threads")
+    if os.path.exists(PATH):
+        checkpoint = torch.load(PATH)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    print(f"Training on {device}")
     print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
     print(f"Batch size: {batch_size}")
 
@@ -115,6 +113,15 @@ if __name__ == "__main__":
     total_start_time = time.time()
 
     for epoch in range(num_epochs):
+        # Load previous results if they exist
+        losses = []
+        accs = []
+        if os.path.exists("mobilenet_results.txt"):
+            with open("mobilenet_results.txt", mode="r") as file:
+                lines = file.readlines()
+                losses = ast.literal_eval(lines[0][len("Training losses: ") :].strip())
+                accs = ast.literal_eval(lines[1][len("Testing accuracies: ") :].strip())
+
         epoch_start_time = time.time()
         model.train()
         epoch_loss = 0
@@ -153,6 +160,7 @@ if __name__ == "__main__":
         losses.append(avg_epoch_loss)
 
         # Evaluate
+        model.eval()
         accuracy = evaluate(model, val_data_loader, device, transform)
         accs.append(accuracy * 100)
 
@@ -163,16 +171,20 @@ if __name__ == "__main__":
         print(f"Accuracy: {accuracy * 100:.2f}%")
         print(f"Time: {epoch_time:.1f}s")
 
-        # Save checkpoint
+        # Save results and model every epoch
+        with open("mobilenet_results.txt", mode="w") as file:
+            file.write("Training losses: " + str(losses) + "\n")
+            file.write("Testing accuracies: " + str(accs) + "\n")
+        
         torch.save(
             {
-                "epoch": epoch + 1,
+                "epoch": len(losses) + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "loss": avg_epoch_loss,
                 "accuracy": accuracy,
             },
-            f"mobilenet_checkpoint_epoch_{epoch+1}.pth",
+            PATH,
         )
 
     # Training complete
@@ -196,11 +208,3 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig("mobilenet_results.png")
     plt.close()
-
-    # Save results
-    with open("mobilenet_results.txt", mode="w") as file:
-        file.write("Training losses: " + str(losses) + "\n")
-        file.write("Testing accuracies: " + str(accs) + "\n")
-
-    # Save model
-    torch.save(model.state_dict(), "mobilenet_card_detector.pth")
