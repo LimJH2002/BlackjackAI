@@ -134,11 +134,14 @@ def evaluate(
                 gt_matched = torch.zeros(len(boxes_gt), dtype=torch.bool)
 
                 # For each predicted box
-                for pred_box, pred_label in zip(boxes_pred, labels_pred):
+                for i in range(len(boxes_pred)):
+                    pred_box = boxes_pred[i]
+                    pred_label = labels_pred[i]
+
                     # Calculate IoU with all gt boxes
                     ious = torch.zeros(len(boxes_gt))
-                    for i, gt_box in enumerate(boxes_gt):
-                        ious[i] = compute_iou(pred_box, gt_box)
+                    for j, gt_box in enumerate(boxes_gt):
+                        ious[j] = compute_iou(pred_box, gt_box)
 
                     # Find best matching gt box
                     if len(ious) > 0:
@@ -148,7 +151,7 @@ def evaluate(
                         # If IoU is good enough and classes match and gt box hasn't been matched
                         if (
                             best_match_iou >= iou_threshold
-                            and labels_pred[pred_label] == labels_gt[best_match_idx]
+                            and pred_label == labels_gt[best_match_idx]
                             and not gt_matched[best_match_idx]
                         ):
                             correct += 1
