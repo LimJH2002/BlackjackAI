@@ -101,10 +101,13 @@ def compute_iou(box1, box2):
     return inter_area / union_area if union_area > 0 else 0
 
 
-def evaluate(model, data_loader, device, transform):
+def evaluate(
+    model, data_loader, device, transform, iou_threshold=0.5, confidence_threshold=0.5
+):
     model.eval()
     correct = 0
     total = 0
+
     with torch.no_grad():
         for imgs, targets in data_loader:
             imgs = [transform(img).to(device) for img in imgs]
@@ -112,19 +115,50 @@ def evaluate(model, data_loader, device, transform):
 
             predictions = model(imgs)
 
-            for target, prediction in zip(targets, predictions):
-                boxes_pred = prediction["boxes"]
-                scores_pred = prediction["scores"]
+            for target, pred in zip(targets, predictions):
+                # Get ground truth boxes and labels
                 boxes_gt = target["boxes"]
+                labels_gt = target["labels"]
 
-                for t, p in zip(boxes_gt, boxes_pred):
-                    iou = compute_iou(t, p)
-                    if iou > 0.5:
-                        correct += 1
-                    total += 1
+                # Get predicted boxes, scores, and labels
+                boxes_pred = pred["boxes"]
+                scores_pred = pred["scores"]
+                labels_pred = pred["labels"]
 
-    accuracy = correct / total if total > 0 else 0
-    return accuracy
+                # Filter predictions by confidence threshold
+                mask = scores_pred >= confidence_threshold
+                boxes_pred = boxes_pred[mask]
+                labels_pred = labels_pred[mask]
+
+                # Keep track of which gt boxes have been matched
+                gt_matched = torch.zeros(len(boxes_gt), dtype=torch.bool)
+
+                # For each predicted box
+                for pred_box, pred_label in zip(boxes_pred, labels_pred):
+                    # Calculate IoU with all gt boxes
+                    ious = torch.zeros(len(boxes_gt))
+                    for i, gt_box in enumerate(boxes_gt):
+                        ious[i] = compute_iou(pred_box, gt_box)
+
+                    # Find best matching gt box
+                    if len(ious) > 0:
+                        best_match_idx = torch.argmax(ious).item()
+                        best_match_iou = ious[best_match_idx]
+
+                        # If IoU is good enough and classes match and gt box hasn't been matched
+                        if (
+                            best_match_iou >= iou_threshold
+                            and labels_pred[pred_label] == labels_gt[best_match_idx]
+                            and not gt_matched[best_match_idx]
+                        ):
+                            correct += 1
+                            gt_matched[best_match_idx] = True
+
+                # Add total ground truth boxes to total
+                total += len(boxes_gt)
+
+    mAP = correct / total if total > 0 else 0
+    return mAP
 
 
 def collate_fn(batch):
