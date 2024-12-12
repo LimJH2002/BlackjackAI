@@ -1,17 +1,17 @@
-import ast  # For loading previous training data
+import json  # For parsing COCO annotations
 import os  # For reading previously saved model
 import time
-import json  # For parsing COCO annotations
 
 import matplotlib.pyplot as plt
 import torch
+from PIL import Image
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchvision import transforms
 from torchvision.models.detection import (
     FasterRCNN_MobileNet_V3_Large_FPN_Weights,
     fasterrcnn_mobilenet_v3_large_fpn,
 )
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from PIL import Image
 
 
 class COCODataset(torch.utils.data.Dataset):
@@ -25,11 +25,11 @@ class COCODataset(torch.utils.data.Dataset):
         super().__init__()
         self.images_dir = images_dir
         self.transforms = transforms
-        
+
         # Load annotations
         with open(annotations_file, "r") as f:
             self.annotations = json.load(f)
-        
+
         # Create image-to-annotation mapping
         self.image_data = {img["id"]: img for img in self.annotations["images"]}
         self.annotations_by_image = {}
@@ -38,9 +38,11 @@ class COCODataset(torch.utils.data.Dataset):
             if img_id not in self.annotations_by_image:
                 self.annotations_by_image[img_id] = []
             self.annotations_by_image[img_id].append(ann)
-        
+
         # Map categories to IDs
-        self.category_map = {cat["id"]: cat["name"] for cat in self.annotations["categories"]}
+        self.category_map = {
+            cat["id"]: cat["name"] for cat in self.annotations["categories"]
+        }
         self.image_ids = list(self.image_data.keys())
 
     def __len__(self):
@@ -51,7 +53,7 @@ class COCODataset(torch.utils.data.Dataset):
         img_info = self.image_data[img_id]
         img_path = os.path.join(self.images_dir, img_info["file_name"])
         image = Image.open(img_path).convert("RGB")
-        
+
         # Get annotations for this image
         annotations = self.annotations_by_image.get(img_id, [])
         boxes = []
@@ -62,15 +64,15 @@ class COCODataset(torch.utils.data.Dataset):
             y_max = y_min + height
             boxes.append([x_min, y_min, x_max, y_max])
             labels.append(ann["category_id"])
-        
+
         # Convert to tensor
         boxes = torch.tensor(boxes, dtype=torch.float32)
         labels = torch.tensor(labels, dtype=torch.int64)
         target = {"boxes": boxes, "labels": labels}
-        
+
         if self.transforms:
             image, target = self.transforms(image, target)
-        
+
         return image, target
 
 
@@ -111,8 +113,8 @@ def evaluate(model, data_loader, device, transform):
             predictions = model(imgs)
 
             for target, prediction in zip(targets, predictions):
-                boxes_pred = prediction['boxes']
-                scores_pred = prediction['scores']
+                boxes_pred = prediction["boxes"]
+                scores_pred = prediction["scores"]
                 boxes_gt = target["boxes"]
 
                 for t, p in zip(boxes_gt, boxes_pred):
@@ -129,9 +131,22 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 
+def save_metrics(
+    train_losses, val_accuracies, test_accuracy, filename="model_metrics.json"
+):
+    metrics = {
+        "training_losses": train_losses,
+        "validation_accuracies": val_accuracies,
+        "test_accuracy": test_accuracy,
+    }
+    with open(filename, "w") as f:
+        json.dump(metrics, f)
+
+
 if __name__ == "__main__":
     num_classes = 52
     batch_size = 16
+    num_epochs = 10
 
     train_dataset = COCODataset(
         "./data/train/images",
@@ -141,6 +156,11 @@ if __name__ == "__main__":
     val_dataset = COCODataset(
         "./data/valid/images",
         "./data/valid/annotations_coco.json",
+        transforms=None,
+    )
+    test_dataset = COCODataset(
+        "./data/test/images",
+        "./data/test/annotations_coco.json",
         transforms=None,
     )
 
@@ -160,9 +180,18 @@ if __name__ == "__main__":
         num_workers=2,
         pin_memory=True,
     )
+    test_data_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=2,
+        pin_memory=True,
+    )
 
-    device = torch.device("cuda")
+    device = torch.device("mps")
     model = get_model(num_classes)
+
     # Freeze the backbone layers
     for param in model.backbone.parameters():
         param.requires_grad = False
@@ -176,20 +205,35 @@ if __name__ == "__main__":
         if isinstance(layer, torch.nn.BatchNorm2d):
             layer.eval()
 
-    # Define optimizer for trainable parameters only
     optimizer = torch.optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()), 
-        lr=0.001, 
-        weight_decay=0.0001
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=0.001,
+        weight_decay=0.0001,
     )
+    transform = transforms.ToTensor()
+
     model.to(device)
 
-    PATH = './mobilenet_card_detector.pth'
-    
+    PATH = "./mobilenet_card_detector.pth"
+    BEST_MODEL_PATH = "./mobilenet_card_detector_best.pth"
+
     # Define optimizer and transform
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=0.001,
+        weight_decay=0.0001,
+    )
+
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=0.1,
+        patience=2,
+        verbose=True,
+        min_lr=1e-7,
+    )
+
     transform = transforms.ToTensor()
-    num_epochs = 5
 
     # Load pre-trained model and optimizer state if available
     if os.path.exists(PATH):
@@ -201,19 +245,14 @@ if __name__ == "__main__":
     print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
     print(f"Batch size: {batch_size}")
 
+    best_val_accuracy = 0
+    train_losses = []
+    val_accuracies = []
+
     # Training loop
     total_start_time = time.time()
 
     for epoch in range(num_epochs):
-        # Load previous results if they exist
-        losses = []
-        accs = []
-        if os.path.exists("mobilenet_results.txt"):
-            with open("mobilenet_results.txt", mode="r") as file:
-                lines = file.readlines()
-                losses = ast.literal_eval(lines[0][len("Training losses: ") :].strip())
-                accs = ast.literal_eval(lines[1][len("Testing accuracies: ") :].strip())
-
         epoch_start_time = time.time()
         model.train()
         epoch_loss = 0
@@ -222,6 +261,7 @@ if __name__ == "__main__":
         print(f"\nEpoch {epoch+1}/{num_epochs}")
         print("-" * 30)
 
+        # Training Phase
         for batch_idx, (imgs, targets) in enumerate(train_data_loader):
             batch_start_time = time.time()
 
@@ -229,7 +269,6 @@ if __name__ == "__main__":
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
             optimizer.zero_grad()
-
             loss_dict = model(imgs, targets)
             current_loss = sum(loss for loss in loss_dict.values())
             current_loss.backward()
@@ -247,33 +286,46 @@ if __name__ == "__main__":
                     f"Time: {batch_time:.1f}s"
                 )
 
-        # Calculate metrics
+        # Calculate epoch metrics
         avg_epoch_loss = epoch_loss / batch_count if batch_count > 0 else float("inf")
-        losses.append(avg_epoch_loss)
+        train_losses.append(avg_epoch_loss)
 
-        # Evaluate
-        accuracy = evaluate(model, val_data_loader, device, transform)
-        accs.append(accuracy * 100)
+        # Validation phase
+        val_accuracy = evaluate(model, val_data_loader, device, transform)
+        val_accuracies.append(val_accuracy * 100)
+
+        scheduler.step(val_accuracy)
+
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(f"Current Learning Rate: {current_lr}")
+
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "val_accuracy": val_accuracy,
+                },
+                BEST_MODEL_PATH,
+            )
 
         # Print epoch summary
         epoch_time = time.time() - epoch_start_time
         print(f"\nEpoch {epoch+1} Summary:")
-        print(f"Loss: {avg_epoch_loss:.4f}")
-        print(f"Accuracy: {accuracy * 100:.2f}%")
+        print(f"Train Loss: {avg_epoch_loss:.4f}")
+        print(f"Validation Accuracy: {val_accuracy * 100:.2f}%")
         print(f"Time: {epoch_time:.1f}s")
 
-        # Save results and model every epoch
-        with open("mobilenet_results.txt", mode="w") as file:
-            file.write("Training losses: " + str(losses) + "\n")
-            file.write("Testing accuracies: " + str(accs) + "\n")
-        
         torch.save(
             {
-                "epoch": len(losses) + 1,
+                "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "loss": avg_epoch_loss,
-                "accuracy": accuracy,
+                "scheduler_state_dict": scheduler.state_dict(),
+                "train_loss": avg_epoch_loss,
+                "val_accuracy": val_accuracy,
             },
             PATH,
         )
@@ -282,20 +334,34 @@ if __name__ == "__main__":
     total_time = time.time() - total_start_time
     print(f"\nTraining completed in {total_time/60:.1f} minutes")
 
+    best_checkpoint = torch.load(BEST_MODEL_PATH)
+    model.load_state_dict(best_checkpoint["model_state_dict"])
+
+    print("\nPerforming final test evaluation...")
+    test_accuracy = evaluate(model, test_data_loader, device, transform)
+    print(f"Final Test Accuracy: {test_accuracy * 100:.2f}%")
+
     # Plot results
     plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
-    plt.plot(losses)
+
+    plt.subplot(1, 3, 1)
+    plt.plot(train_losses)
     plt.title("Training Loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
 
-    plt.subplot(1, 2, 2)
-    plt.plot(accs)
+    plt.subplot(1, 3, 2)
+    plt.plot(val_accuracies)
     plt.title("Validation Accuracy")
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy (%)")
 
+    plt.subplot(1, 3, 3)
+    plt.axhline(y=test_accuracy * 100, color="r", linestyle="-")
+    plt.title("Test Accuracy")
+    plt.ylabel("Accuracy (%)")
+    plt.ylim(0, 100)
+
     plt.tight_layout()
-    plt.savefig("mobilenet_results.png")
+    plt.savefig("training_results.png")
     plt.close()
