@@ -1,6 +1,7 @@
-import ast  # for loading the previous training data
-import os  # for reading previously saved model
+import ast  # For loading previous training data
+import os  # For reading previously saved model
 import time
+import json  # For parsing COCO annotations
 
 import matplotlib.pyplot as plt
 import torch
@@ -10,8 +11,67 @@ from torchvision.models.detection import (
     fasterrcnn_mobilenet_v3_large_fpn,
 )
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from PIL import Image
 
-from CardDataset import CardDataset
+
+class COCODataset(torch.utils.data.Dataset):
+    def __init__(self, images_dir, annotations_file, transforms=None):
+        """
+        Args:
+            images_dir (str): Path to the directory containing images.
+            annotations_file (str): Path to the COCO annotations JSON file.
+            transforms: Transforms to apply to images and annotations.
+        """
+        super().__init__()
+        self.images_dir = images_dir
+        self.transforms = transforms
+        
+        # Load annotations
+        with open(annotations_file, "r") as f:
+            self.annotations = json.load(f)
+        
+        # Create image-to-annotation mapping
+        self.image_data = {img["id"]: img for img in self.annotations["images"]}
+        self.annotations_by_image = {}
+        for ann in self.annotations["annotations"]:
+            img_id = ann["image_id"]
+            if img_id not in self.annotations_by_image:
+                self.annotations_by_image[img_id] = []
+            self.annotations_by_image[img_id].append(ann)
+        
+        # Map categories to IDs
+        self.category_map = {cat["id"]: cat["name"] for cat in self.annotations["categories"]}
+        self.image_ids = list(self.image_data.keys())
+
+    def __len__(self):
+        return len(self.image_ids)
+
+    def __getitem__(self, idx):
+        img_id = self.image_ids[idx]
+        img_info = self.image_data[img_id]
+        img_path = os.path.join(self.images_dir, img_info["file_name"])
+        image = Image.open(img_path).convert("RGB")
+        
+        # Get annotations for this image
+        annotations = self.annotations_by_image.get(img_id, [])
+        boxes = []
+        labels = []
+        for ann in annotations:
+            x_min, y_min, width, height = ann["bbox"]
+            x_max = x_min + width
+            y_max = y_min + height
+            boxes.append([x_min, y_min, x_max, y_max])
+            labels.append(ann["category_id"])
+        
+        # Convert to tensor
+        boxes = torch.tensor(boxes, dtype=torch.float32)
+        labels = torch.tensor(labels, dtype=torch.int64)
+        target = {"boxes": boxes, "labels": labels}
+        
+        if self.transforms:
+            image, target = self.transforms(image, target)
+        
+        return image, target
 
 
 def get_model(num_classes):
@@ -51,7 +111,11 @@ def evaluate(model, data_loader, device, transform):
             predictions = model(imgs)
 
             for target, prediction in zip(targets, predictions):
-                for t, p in zip(target["boxes"], prediction["boxes"]):
+                boxes_pred = prediction['boxes']
+                scores_pred = prediction['scores']
+                boxes_gt = target["boxes"]
+
+                for t, p in zip(boxes_gt, boxes_pred):
                     iou = compute_iou(t, p)
                     if iou > 0.5:
                         correct += 1
@@ -66,19 +130,26 @@ def collate_fn(batch):
 
 
 if __name__ == "__main__":
-    # Initialize dataset and model
     num_classes = 52
     batch_size = 16
 
-    train_dataset = CardDataset("./data/train/images", "./data/train/labels_pascal")
-    val_dataset = CardDataset("./data/valid/images", "./data/valid/labels_pascal")
+    train_dataset = COCODataset(
+        "./data/train/images",
+        "./data/train/annotations_coco.json",
+        transforms=None,
+    )
+    val_dataset = COCODataset(
+        "./data/valid/images",
+        "./data/valid/annotations_coco.json",
+        transforms=None,
+    )
 
     train_data_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=2,  # Parallel data loading
+        num_workers=2,
         pin_memory=True,
     )
     val_data_loader = torch.utils.data.DataLoader(
@@ -91,15 +162,36 @@ if __name__ == "__main__":
     )
 
     device = torch.device("cuda")
-    model = get_model(num_classes).to(device)
+    model = get_model(num_classes)
+    # Freeze the backbone layers
+    for param in model.backbone.parameters():
+        param.requires_grad = False
+
+    # Fine-tune the ROI heads
+    for param in model.roi_heads.parameters():
+        param.requires_grad = True
+
+    # Freeze BatchNorm layers for stability
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.BatchNorm2d):
+            layer.eval()
+
+    # Define optimizer for trainable parameters only
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()), 
+        lr=0.001, 
+        weight_decay=0.0001
+    )
+    model.to(device)
 
     PATH = './mobilenet_card_detector.pth'
     
     # Define optimizer and transform
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
     transform = transforms.ToTensor()
-    num_epochs = 50
+    num_epochs = 5
 
+    # Load pre-trained model and optimizer state if available
     if os.path.exists(PATH):
         checkpoint = torch.load(PATH)
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -160,7 +252,6 @@ if __name__ == "__main__":
         losses.append(avg_epoch_loss)
 
         # Evaluate
-        model.eval()
         accuracy = evaluate(model, val_data_loader, device, transform)
         accs.append(accuracy * 100)
 
