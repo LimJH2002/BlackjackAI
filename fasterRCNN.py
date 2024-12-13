@@ -1,5 +1,6 @@
 import json  # For parsing COCO annotations
 import os  # For reading previously saved model
+import ast # for loading the previous training data
 import time
 
 import matplotlib.pyplot as plt
@@ -183,7 +184,7 @@ def save_metrics(
 if __name__ == "__main__":
     num_classes = 52
     batch_size = 16
-    num_epochs = 10
+    num_epochs = 15
 
     train_dataset = COCODataset(
         "./data/train/images",
@@ -226,7 +227,7 @@ if __name__ == "__main__":
         pin_memory=True,
     )
 
-    device = torch.device("mps")
+    device = torch.device("cuda")
     model = get_model(num_classes)
 
     # Freeze the backbone layers
@@ -282,14 +283,18 @@ if __name__ == "__main__":
     print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
     print(f"Batch size: {batch_size}")
 
-    best_val_accuracy = 0
-    train_losses = []
-    val_accuracies = []
-
     # Training loop
     total_start_time = time.time()
 
     for epoch in range(num_epochs):
+        train_losses = []
+        val_accuracies = []
+        if os.path.exists("mobilenet_results.txt"):
+            with open("mobilenet_results.txt", mode="r") as file:
+                lines = file.readlines()
+                train_losses = ast.literal_eval(lines[0][len("Training losses: ") :].strip())
+                val_accuracies = ast.literal_eval(lines[1][len("Testing accuracies: ") :].strip())
+
         epoch_start_time = time.time()
         model.train()
         epoch_loss = 0
@@ -336,8 +341,9 @@ if __name__ == "__main__":
         current_lr = optimizer.param_groups[0]["lr"]
         print(f"Current Learning Rate: {current_lr}")
 
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
+        best_val_accuracy = max(val_accuracies)/100
+        if val_accuracy >= best_val_accuracy:
+            print("Saving the best model...")
             torch.save(
                 {
                     "epoch": epoch + 1,
@@ -355,6 +361,11 @@ if __name__ == "__main__":
         print(f"Validation Accuracy: {val_accuracy * 100:.2f}%")
         print(f"Time: {epoch_time:.1f}s")
 
+        # Save results and model every epoch
+        with open("mobilenet_results.txt", mode="w") as file:
+            file.write("Training losses: " + str(train_losses) + "\n")
+            file.write("Testing accuracies: " + str(val_accuracies) + "\n")
+
         torch.save(
             {
                 "epoch": epoch + 1,
@@ -367,38 +378,34 @@ if __name__ == "__main__":
             PATH,
         )
 
+        # Plot results
+        plt.figure(figsize=(12, 5))
+
+        plt.subplot(1, 3, 1)
+        plt.plot(train_losses)
+        plt.title("Training Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+
+        plt.subplot(1, 3, 2)
+        plt.plot(val_accuracies)
+        plt.title("Validation Accuracy")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy (%)")
+
+        plt.tight_layout()
+        plt.savefig("training_results.png")
+
     # Training complete
     total_time = time.time() - total_start_time
     print(f"\nTraining completed in {total_time/60:.1f} minutes")
 
-    best_checkpoint = torch.load(BEST_MODEL_PATH)
-    model.load_state_dict(best_checkpoint["model_state_dict"])
+    if os.path.exists(BEST_MODEL_PATH):
+        best_checkpoint = torch.load(BEST_MODEL_PATH)
+        model.load_state_dict(best_checkpoint["model_state_dict"])
 
     print("\nPerforming final test evaluation...")
     test_accuracy = evaluate(model, test_data_loader, device, transform)
     print(f"Final Test Accuracy: {test_accuracy * 100:.2f}%")
 
-    # Plot results
-    plt.figure(figsize=(12, 5))
-
-    plt.subplot(1, 3, 1)
-    plt.plot(train_losses)
-    plt.title("Training Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-
-    plt.subplot(1, 3, 2)
-    plt.plot(val_accuracies)
-    plt.title("Validation Accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy (%)")
-
-    plt.subplot(1, 3, 3)
-    plt.axhline(y=test_accuracy * 100, color="r", linestyle="-")
-    plt.title("Test Accuracy")
-    plt.ylabel("Accuracy (%)")
-    plt.ylim(0, 100)
-
-    plt.tight_layout()
-    plt.savefig("training_results.png")
     plt.close()
