@@ -210,7 +210,6 @@ class BalancedImageAugmenter:
 
 
 if __name__ == "__main__":
-    # Initialize augmenter
     augmenter = BalancedImageAugmenter(
         image_dir="data/train/images", label_dir="data/train/labels"
     )
@@ -242,8 +241,6 @@ if __name__ == "__main__":
         # Clean up temporary directories
         shutil.rmtree(temp_image_dir)
         shutil.rmtree(temp_label_dir)
-
-        print("Augmentation completed successfully!")
 
     except Exception as e:
         print(f"An error occurred: {str(e)}")
