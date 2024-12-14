@@ -1,6 +1,6 @@
-import json  # For parsing COCO annotations
-import os  # For reading previously saved model
-import ast # for loading the previous training data
+import ast
+import json
+import os
 import time
 
 import matplotlib.pyplot as plt
@@ -292,8 +292,12 @@ if __name__ == "__main__":
         if os.path.exists("mobilenet_results.txt"):
             with open("mobilenet_results.txt", mode="r") as file:
                 lines = file.readlines()
-                train_losses = ast.literal_eval(lines[0][len("Training losses: ") :].strip())
-                val_accuracies = ast.literal_eval(lines[1][len("Testing accuracies: ") :].strip())
+                train_losses = ast.literal_eval(
+                    lines[0][len("Training losses: ") :].strip()
+                )
+                val_accuracies = ast.literal_eval(
+                    lines[1][len("Testing accuracies: ") :].strip()
+                )
 
         epoch_start_time = time.time()
         model.train()
@@ -341,7 +345,7 @@ if __name__ == "__main__":
         current_lr = optimizer.param_groups[0]["lr"]
         print(f"Current Learning Rate: {current_lr}")
 
-        best_val_accuracy = max(val_accuracies)/100
+        best_val_accuracy = max(val_accuracies) / 100
         if val_accuracy >= best_val_accuracy:
             print("Saving the best model...")
             torch.save(
